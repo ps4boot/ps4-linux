@@ -1,3 +1,17 @@
+
+
+linux-5.3.18-VANILLE-source + new fix for Belize internal hdd
+
+git clone 
+https://github.com/ps4gentoo/ps4-linux
+cd ps4-linux
+mv config .config
+make -j9
+
+have fun...
+
+
+
 Linux kernel
 ============
 
