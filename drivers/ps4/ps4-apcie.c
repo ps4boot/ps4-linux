@@ -227,12 +227,16 @@ static int apcie_is_compatible_device(struct pci_dev *dev)
 		return 0;
 	}
 	return (dev->device == PCI_DEVICE_ID_SONY_AEOLIA_PCIE ||
-		dev->device == PCI_DEVICE_ID_SONY_BELIZE_PCIE ||
-		dev->device == PCI_DEVICE_ID_SONY_BAIKAL_PCIE);
+		dev->device == PCI_DEVICE_ID_SONY_BELIZE_PCIE);
 }
 
+/* From arch/x86/platform/ps4/ps4.c */
+extern bool bpcie_initialized;
 int apcie_assign_irqs(struct pci_dev *dev, int nvec)
 {
+	if (bpcie_initialized)
+		return bpcie_assign_irqs(dev, nvec);
+
 	int ret;
 	unsigned int sc_devfn;
 	struct pci_dev *sc_dev;
@@ -289,7 +293,10 @@ EXPORT_SYMBOL(apcie_assign_irqs);
 
 void apcie_free_irqs(unsigned int virq, unsigned int nr_irqs)
 {
-	irq_domain_free_irqs(virq, nr_irqs);
+	if (bpcie_initialized)
+		bpcie_free_irqs(virq, nr_irqs);
+	else
+		irq_domain_free_irqs(virq, nr_irqs);
 }
 EXPORT_SYMBOL(apcie_free_irqs);
 
@@ -516,7 +523,6 @@ static int apcie_resume(struct pci_dev *dev) {
 static const struct pci_device_id apcie_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SONY, PCI_DEVICE_ID_SONY_AEOLIA_PCIE), },
 	{ PCI_DEVICE(PCI_VENDOR_ID_SONY, PCI_DEVICE_ID_SONY_BELIZE_PCIE), },
-	{ PCI_DEVICE(PCI_VENDOR_ID_SONY, PCI_DEVICE_ID_SONY_BAIKAL_PCIE), },
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, apcie_pci_tbl);

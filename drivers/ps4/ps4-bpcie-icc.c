@@ -9,27 +9,28 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <asm/ps4.h>
-#include "aeolia.h"
+#include "baikal.h"
 
-/* There should normally be only one Aeolia device in a system. This allows
+#define bpcie_icc_dev abpcie_icc_dev
+
+/* There should normally be only one Baikal device in a system. This allows
  * other kernel code in unrelated subsystems to issue icc requests without
  * having to get a reference to the device. */
-static struct apcie_dev *icc_sc;
+static struct bpcie_dev *icc_sc;
 
-DEFINE_MUTEX(icc_mutex);
-
+DEFINE_MUTEX(bcpie_icc_mutex);
 /* The ICC message passing interface seems to be potentially designed to
  * support multiple outstanding requests at once, but the original PS4 OS never
  * does this, so we don't either. */
 
-#define REQUEST (sc->icc.spm + APCIE_SPM_ICC_REQUEST)
-#define REPLY (sc->icc.spm + APCIE_SPM_ICC_REPLY)
+#define REQUEST (sc->icc.spm + BPCIE_SPM_ICC_REQUEST)
+#define REPLY (sc->icc.spm + BPCIE_SPM_ICC_REPLY)
 
-int icc_i2c_init(struct apcie_dev *sc);
-void icc_i2c_remove(struct apcie_dev *sc);
-int icc_pwrbutton_init(struct apcie_dev *sc);
-void icc_pwrbutton_remove(struct apcie_dev *sc);
-void icc_pwrbutton_trigger(struct apcie_dev *sc, int state);
+int icc_i2c_init(struct bpcie_dev *sc);
+void icc_i2c_remove(struct bpcie_dev *sc);
+int icc_pwrbutton_init(struct bpcie_dev *sc);
+void icc_pwrbutton_remove(struct bpcie_dev *sc);
+void icc_pwrbutton_trigger(struct bpcie_dev *sc, int state);
 
 static u16 checksum(const void *p, int length)
 {
@@ -40,7 +41,7 @@ static u16 checksum(const void *p, int length)
 	return sum;
 }
 
-static void dump_message(struct apcie_dev *sc, int offset)
+static void dump_message(struct bpcie_dev *sc, int offset)
 {
 	int len;
 	struct icc_message_hdr hdr;
@@ -59,7 +60,7 @@ static void dump_message(struct apcie_dev *sc, int offset)
 	}
 }
 
-static void handle_event(struct apcie_dev *sc, struct icc_message_hdr *msg)
+static void handle_event(struct bpcie_dev *sc, struct icc_message_hdr *msg)
 {
 	switch ((msg->major << 16) | msg->minor) {
 		case 0x088010:
@@ -70,12 +71,12 @@ static void handle_event(struct apcie_dev *sc, struct icc_message_hdr *msg)
 			break;
 		default:
 			sc_err("icc: event arrived, not yet supported.\n");
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			break;
 	}
 }
 
-static void handle_message(struct apcie_dev *sc)
+static void handle_message(struct bpcie_dev *sc)
 {
 	u32 rep_empty, rep_full;
 	int off, copy_size;
@@ -95,33 +96,33 @@ static void handle_message(struct apcie_dev *sc)
 	if (msg.minor & ICC_EVENT) {
 		if (msg.magic != ICC_EVENT_MAGIC) {
 			sc_err("icc: event has bad magic\n");
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			return;
 		}
 		handle_event(sc, &msg);
 	} else if (msg.minor & ICC_REPLY) {
 		if (msg.magic != ICC_MAGIC) {
 			sc_err("icc: reply has bad magic\n");
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			return;
 		}
 		spin_lock(&sc->icc.reply_lock);
 		if (!sc->icc.reply_pending) {
 			spin_unlock(&sc->icc.reply_lock);
 			sc_err("icc: unexpected reply\n");
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			return;
 		}
 		if (msg.cookie != sc->icc.request.cookie) {
 			spin_unlock(&sc->icc.reply_lock);
 			sc_err("icc: reply has bad cookie %d\n", msg.cookie);
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			return;
 		}
 		if (msg.length < ICC_HDR_SIZE || msg.length > ICC_MAX_SIZE) {
 			spin_unlock(&sc->icc.reply_lock);
 			sc_err("icc: reply has bad length %d\n", msg.length);
-			dump_message(sc, APCIE_SPM_ICC_REPLY);
+			dump_message(sc, BPCIE_SPM_ICC_REPLY);
 			return;
 		}
 		off = ICC_HDR_SIZE;
@@ -137,35 +138,36 @@ static void handle_message(struct apcie_dev *sc)
 		sc->icc.reply = msg;
 		spin_unlock(&sc->icc.reply_lock);
 		wake_up(&sc->icc.wq);
+		//stop_hpet_timers(sc);
 	} else {
 		sc_err("icc: unknown message arrived\n");
-		dump_message(sc, APCIE_SPM_ICC_REPLY);
+		dump_message(sc, BPCIE_SPM_ICC_REPLY);
 	}
 }
 
 static irqreturn_t icc_interrupt(int irq, void *arg)
 {
-	struct apcie_dev *sc = arg;
+	struct bpcie_dev *sc = arg;
 	u32 status;
 	u32 ret = IRQ_NONE;
 
 	do {
-		status = ioread32(sc->bar4 + APCIE_REG_ICC_STATUS);
+		status = ioread32(sc->bar2 + BPCIE_REG_ICC_STATUS);
 
-		if (status & APCIE_ICC_ACK) {
-			iowrite32(APCIE_ICC_ACK,
-				  sc->bar4 + APCIE_REG_ICC_STATUS);
+		if (status & BPCIE_ICC_ACK) {
+			iowrite32(BPCIE_ICC_ACK,
+				  sc->bar2 + BPCIE_REG_ICC_STATUS);
 			ret = IRQ_HANDLED;
 		}
 
-		if (status & APCIE_ICC_SEND) {
-			iowrite32(APCIE_ICC_SEND,
-				  sc->bar4 + APCIE_REG_ICC_STATUS);
+		if (status & BPCIE_ICC_SEND) {
+			iowrite32(BPCIE_ICC_SEND,
+				  sc->bar2 + BPCIE_REG_ICC_STATUS);
 			handle_message(sc);
 			iowrite32(0, REPLY + BUF_FULL);
 			iowrite32(1, REPLY + BUF_EMPTY);
-			iowrite32(APCIE_ICC_ACK,
-				  sc->bar4 + APCIE_REG_ICC_DOORBELL);
+			iowrite32(BPCIE_ICC_ACK,
+				  sc->bar2 + BPCIE_REG_ICC_DOORBELL);
 			ret = IRQ_HANDLED;
 		}
 	} while (status);
@@ -173,7 +175,7 @@ static irqreturn_t icc_interrupt(int irq, void *arg)
 	return ret;
 }
 
-static int _apcie_icc_cmd(struct apcie_dev *sc, u8 major, u16 minor, const void *data,
+static int _bpcie_icc_cmd(struct bpcie_dev *sc, u8 major, u16 minor, const void *data,
 		    u16 length, void *reply, u16 reply_length, bool intr)
 {
 	int ret;
@@ -220,7 +222,7 @@ static int _apcie_icc_cmd(struct apcie_dev *sc, u8 major, u16 minor, const void 
 	sc->icc.reply_pending = true;
 	spin_unlock_irq(&sc->icc.reply_lock);
 
-	iowrite32(APCIE_ICC_SEND, sc->bar4 + APCIE_REG_ICC_DOORBELL);
+	iowrite32(BPCIE_ICC_SEND, sc->bar2 + BPCIE_REG_ICC_DOORBELL);
 
 	if (intr)
 		ret = wait_event_interruptible_timeout(sc->icc.wq,
@@ -262,27 +264,47 @@ static int _apcie_icc_cmd(struct apcie_dev *sc, u8 major, u16 minor, const void 
 	return sc->icc.reply.length - ICC_HDR_SIZE;
 }
 
-/* From arch/x86/platform/ps4/ps4.c */
-extern bool bpcie_initialized;
-int apcie_icc_cmd(u8 major, u16 minor, const void *data, u16 length,
+int bpcie_icc_cmd(u8 major, u16 minor, const void *data, u16 length,
 		   void *reply, u16 reply_length)
 {
-	if (bpcie_initialized)
-			return bpcie_icc_cmd(major, minor, data, length, reply, reply_length);
-	
 	int ret;
 
-	mutex_lock(&icc_mutex);
+	mutex_lock(&bcpie_icc_mutex);
 	if (!icc_sc) {
 		pr_err("icc: not ready\n");
 		return -EAGAIN;
 	}
-	ret = _apcie_icc_cmd(icc_sc, major, minor, data, length, reply, reply_length,
+	ret = _bpcie_icc_cmd(icc_sc, major, minor, data, length, reply, reply_length,
 		       false);
-	mutex_unlock(&icc_mutex);
+	mutex_unlock(&bcpie_icc_mutex);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(apcie_icc_cmd);
+EXPORT_SYMBOL_GPL(bpcie_icc_cmd);
+
+static void bpcie_init_usb(struct bpcie_dev *sc, int usb_no) {
+	u32 value_to_write;
+	u32 addr;
+	u32 offset;
+
+	offset = usb_no ? 0x68 : 0x64;
+
+	addr = sc->bar2 + BPCIE_USB_BASE + offset;
+	value_to_write = ioread32(addr) | 1;
+	iowrite32(value_to_write, addr);
+
+	offset = usb_no ? 0x28 : 0x24;
+
+	addr = sc->bar2 + BPCIE_USB_BASE + offset;
+	value_to_write = ioread32(addr) | 1;
+	iowrite32(value_to_write, addr);
+
+	offset = usb_no ? 0x68 : 0x64;
+
+	addr = sc->bar2 + BPCIE_USB_BASE + offset;
+	value_to_write = ioread32(addr) | ~1;
+	iowrite32(value_to_write, addr);
+	//TODO:
+}
 
 static void resetUsbPort(void)
 {
@@ -290,17 +312,27 @@ static void resetUsbPort(void)
 	u8 resp[20];
 	int ret;
 	
+	/* Get usb 0 status */
+	ret = bpcie_icc_cmd(5, 0x11, NULL, 0, resp, 20);
+	printk("usb0 status: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
+	if(ret < 0) {
+		printk("USB status failed");
+	} else if (resp[2]) {
+		printk("USB is already turned ON!");
+		return;
+	}
+	/*
 	//Turn OFF Usb
-	ret = apcie_icc_cmd(5, 0x10, &off, sizeof(off), resp, 20);
+	ret = bpcie_icc_cmd(5, 0x10, &off, sizeof(off), resp, 20);
 	printk("Turn OFF USB: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
 	if(ret < 0)
 	{
 		printk("Turn off USB failed!");
 		return;
 	}
-	
+	*/
 	//Turn ON Usb
-	ret = apcie_icc_cmd(5, 0x10, &on, sizeof(on), resp, 20);
+	ret = bpcie_icc_cmd(5, 0x10, &on, sizeof(on), resp, 20);
 	printk("Turn ON USB: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
 	if(ret < 0)
 	{
@@ -317,13 +349,13 @@ static void resetBtWlan(void)
 	
 
 	/* Get bt/wlan status */
-//	ret = apcie_icc_cmd(5, 1, NULL, 0, resp, 20);
+//	ret = bpcie_icc_cmd(5, 1, NULL, 0, resp, 20);
 //	printk("BT/WLAN status: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
 
 	/** Turn off is done from linux-loader actually, if you want you can remove it from linux-loader and done it here **/
 	
 	//Turn OFF bt/wlan
-/*	ret = apcie_icc_cmd(5, 0, &off, sizeof(off), resp, 20);
+/*	ret = bpcie_icc_cmd(5, 0, &off, sizeof(off), resp, 20);
 	printk("Turn OFF BT/WLAN: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
 	if(ret < 0)
 	{
@@ -333,7 +365,7 @@ static void resetBtWlan(void)
 */
 
 	//Turn ON bt/wlan
-	ret = apcie_icc_cmd(5, 0, &on, sizeof(on), resp, 20);
+	ret = bpcie_icc_cmd(5, 0, &on, sizeof(on), resp, 20);
 	printk("Turn ON BT/WLAN: ret=%d, reply %02x %02x %02x %02x", ret, resp[0], resp[1], resp[2], resp[3]);
 	if(ret < 0)
 	{
@@ -358,17 +390,17 @@ static void do_icc_init(void) {
 	};
 	int ret;
 	// test: get FW version
-	ret = apcie_icc_cmd(2, 6, NULL, 0, reply, 0x30);
+	ret = bpcie_icc_cmd(2, 6, NULL, 0, reply, 0x30);
 	printk("ret=%d, reply %02x %02x %02x %02x %02x %02x %02x %02x\n", ret,
 		reply[0], reply[1], reply[2], reply[3],
 		reply[4], reply[5], reply[6], reply[7]);
-	ret = apcie_icc_cmd(1, 0, &svc, 1, reply, 0x30);
+	ret = bpcie_icc_cmd(1, 0, &svc, 1, reply, 0x30);
 	printk("ret=%d, reply %02x %02x %02x %02x %02x %02x %02x %02x\n", ret,
 		reply[0], reply[1], reply[2], reply[3],
 		reply[4], reply[5], reply[6], reply[7]);
 
 	/* Set the LED to something nice */
-	ret = apcie_icc_cmd(9, 0x20, led_config, ARRAY_SIZE(led_config), reply, 0x30);
+	ret = bpcie_icc_cmd(9, 0x20, led_config, ARRAY_SIZE(led_config), reply, 0x30);
 	printk("ret=%d, reply %02x %02x %02x %02x %02x %02x %02x %02x\n", ret,
 		reply[0], reply[1], reply[2], reply[3],
 		reply[4], reply[5], reply[6], reply[7]);
@@ -379,21 +411,21 @@ static void icc_shutdown(void)
 	uint8_t command[] = {
 		0, 0, 2, 0, 1, 0
 	};
-	if (apcie_status() != 1)
+	if (bpcie_status() != 1)
 		return;
-	apcie_icc_cmd(4, 1, command, sizeof(command), NULL, 0);
+	bpcie_icc_cmd(4, 1, command, sizeof(command), NULL, 0);
 	mdelay(3000);
 	WARN_ON(1);
 }
 
-void icc_reboot(void)
+static void icc_reboot(void)
 {
 	uint8_t command[] = {
 		0, 1, 2, 0, 1, 0
 	};
-	if (apcie_status() != 1)
+	if (bpcie_status() != 1)
 		return;
-	apcie_icc_cmd(4, 1, command, sizeof(command), NULL, 0);
+	bpcie_icc_cmd(4, 1, command, sizeof(command), NULL, 0);
 	mdelay(3000);
 	WARN_ON(1);
 }
@@ -418,7 +450,7 @@ static void *ioctl_tmp_buf = NULL;
  			ret = -EFAULT;
  			break;
  		}
- 		reply_len = apcie_icc_cmd(cmd.major, cmd.minor, ioctl_tmp_buf,
+ 		reply_len = bpcie_icc_cmd(cmd.major, cmd.minor, ioctl_tmp_buf,
  			cmd.length, ioctl_tmp_buf, cmd.reply_length);
  		if (reply_len < 0) {
  			ret = reply_len;
@@ -444,37 +476,38 @@ static void *ioctl_tmp_buf = NULL;
  };
 
 
-int apcie_icc_init(struct apcie_dev *sc)
+int bpcie_icc_init(struct bpcie_dev *sc)
 {
 	int ret;
-	unsigned int mem_devfn = PCI_DEVFN(PCI_SLOT(sc->pdev->devfn), AEOLIA_FUNC_ID_MEM);
+	unsigned int mem_devfn = PCI_DEVFN(PCI_SLOT(sc->pdev->devfn), BAIKAL_FUNC_ID_MEM);
 	struct pci_dev *mem_dev;
 	u32 req_empty, req_full;
 
 	/* ICC makes use of a segment of SPM memory, available via a different
-	 * PCI function in Aeolia, so we need to get a handle to it. */
+	 * PCI function in Baikal, so we need to get a handle to it. */
 	mem_dev = pci_get_slot(sc->pdev->bus, mem_devfn);
 	if (!mem_dev) {
 		sc_err("icc: could not get handle to mem device\n");
 		return -ENODEV;
 	}
-
-	if (!request_mem_region(pci_resource_start(sc->pdev, 4) +
-				APCIE_RGN_ICC_BASE, APCIE_RGN_ICC_SIZE,
-				"apcie.icc")) {
+/*
+	//already reserved the whole bar2 at glue_init().
+	if (!request_mem_region(pci_resource_start(sc->pdev, 2) +
+				BPCIE_RGN_ICC_BASE, BPCIE_RGN_ICC_SIZE,
+				"bpcie.icc")) {
 		sc_err("icc: failed to request ICC register region\n");
 		return -EBUSY;
 	}
-
-	sc->icc.spm_base = pci_resource_start(mem_dev, 5) + APCIE_SPM_ICC_BASE;
-	if (!request_mem_region(sc->icc.spm_base, APCIE_SPM_ICC_SIZE,
+*/
+	sc->icc.spm_base = pci_resource_start(mem_dev, 5) + BPCIE_SPM_ICC_BASE;
+	if (!request_mem_region(sc->icc.spm_base, BPCIE_SPM_ICC_SIZE/*pci_resource_len(mem_dev, 5)*/,
 				"spm.icc")) {
 		sc_err("icc: failed to request ICC SPM region\n");
 		ret = -EBUSY;
 		goto release_icc;
 	}
 
-	sc->icc.spm = ioremap(sc->icc.spm_base, APCIE_SPM_ICC_SIZE);
+	sc->icc.spm = ioremap(sc->icc.spm_base, /*pci_resource_len(mem_dev, 5)*/BPCIE_SPM_ICC_SIZE);
 	if (!sc->icc.spm) {
 		sc_err("icc: failed to map ICC portion of SPM\n");
 		ret = -EIO;
@@ -485,10 +518,10 @@ int apcie_icc_init(struct apcie_dev *sc)
 	init_waitqueue_head(&sc->icc.wq);
 
 	/* Clear flags */
-	iowrite32(APCIE_ICC_SEND | APCIE_ICC_ACK,
-		  sc->bar4 + APCIE_REG_ICC_STATUS);
+	iowrite32(BPCIE_ICC_SEND | BPCIE_ICC_ACK,
+		  sc->bar2 + BPCIE_REG_ICC_STATUS);
 
-	ret = request_irq(apcie_irqnum(sc, APCIE_SUBFUNC_ICC),
+	ret = request_irq(bpcie_irqnum(sc, BPCIE_SUBFUNC_ICC),
 			  icc_interrupt, IRQF_SHARED, "icc", sc);
 	if (ret) {
 		sc_err("icc: could not request IRQ: %d\n", ret);
@@ -505,23 +538,22 @@ int apcie_icc_init(struct apcie_dev *sc)
 		goto free_irq;
 	}
 
-	mutex_lock(&icc_mutex);
+	mutex_lock(&bcpie_icc_mutex);
 	icc_sc = sc;
 
 	/* Enable IRQs */
-	iowrite32(APCIE_ICC_SEND | APCIE_ICC_ACK,
-		  sc->bar4 + APCIE_REG_ICC_IRQ_MASK);
-	mutex_unlock(&icc_mutex);
+	iowrite32(BPCIE_ICC_SEND | BPCIE_ICC_ACK,
+		  sc->bar2 + BPCIE_REG_ICC_IRQ_MASK);
+	mutex_unlock(&bcpie_icc_mutex);
 
 	ret = icc_i2c_init(sc);
 	if (ret) {
 		sc_err("icc: i2c init failed: %d\n", ret);
 		goto unassign_global;
 	}
-	
 	resetBtWlan();
-//	resetUsbPort();
-	
+	resetUsbPort();
+
 	ret = icc_pwrbutton_init(sc);
 	/* Not fatal */
 	if (ret)
@@ -545,45 +577,45 @@ int apcie_icc_init(struct apcie_dev *sc)
 	return 0;
 
 unassign_global:
-	mutex_lock(&icc_mutex);
-	iowrite32(0, sc->bar4 + APCIE_REG_ICC_IRQ_MASK);
+	mutex_lock(&bcpie_icc_mutex);
+	iowrite32(0, sc->bar2 + BPCIE_REG_ICC_IRQ_MASK);
 	icc_sc = NULL;
-	mutex_unlock(&icc_mutex);
+	mutex_unlock(&bcpie_icc_mutex);
 free_irq:
-	free_irq(apcie_irqnum(sc, APCIE_SUBFUNC_ICC), sc);
+	free_irq(bpcie_irqnum(sc, BPCIE_SUBFUNC_ICC), sc);
 iounmap:
 	iounmap(sc->icc.spm);
 release_spm:
-	release_mem_region(sc->icc.spm_base, APCIE_SPM_ICC_SIZE);
+	release_mem_region(sc->icc.spm_base, BPCIE_SPM_ICC_SIZE);
 release_icc:
 	release_mem_region(pci_resource_start(sc->pdev, 4) +
-			   APCIE_RGN_ICC_BASE, APCIE_RGN_ICC_SIZE);
+			   BPCIE_RGN_ICC_BASE, BPCIE_RGN_ICC_SIZE);
 	return ret;
 }
 
-void apcie_icc_remove(struct apcie_dev *sc)
+void bpcie_icc_remove(struct bpcie_dev *sc)
 {
-	sc_err("apcie_icc_remove: shouldn't normally be called\n");
+	sc_err("bpcie_icc_remove: shouldn't normally be called\n");
 	pm_power_off = NULL;
 	icc_pwrbutton_remove(sc);
 	icc_i2c_remove(sc);
-	mutex_lock(&icc_mutex);
-	iowrite32(0, sc->bar4 + APCIE_REG_ICC_IRQ_MASK);
+	mutex_lock(&bcpie_icc_mutex);
+	iowrite32(0, sc->bar2 + BPCIE_REG_ICC_IRQ_MASK);
 	icc_sc = NULL;
-	mutex_unlock(&icc_mutex);
-	free_irq(apcie_irqnum(sc, APCIE_SUBFUNC_ICC), sc);
+	mutex_unlock(&bcpie_icc_mutex);
+	free_irq(bpcie_irqnum(sc, BPCIE_SUBFUNC_ICC), sc);
 	iounmap(sc->icc.spm);
-	release_mem_region(sc->icc.spm_base, APCIE_SPM_ICC_SIZE);
-	release_mem_region(pci_resource_start(sc->pdev, 4) +
-			   APCIE_RGN_ICC_BASE, APCIE_RGN_ICC_SIZE);
+	release_mem_region(sc->icc.spm_base, BPCIE_SPM_ICC_SIZE);
+	release_mem_region(pci_resource_start(sc->pdev, 2) +
+			   BPCIE_RGN_ICC_BASE, BPCIE_RGN_ICC_SIZE);
 }
 
 #ifdef CONFIG_PM
-void apcie_icc_suspend(struct apcie_dev *sc, pm_message_t state)
+void bpcie_icc_suspend(struct bpcie_dev *sc, pm_message_t state)
 {
 }
 
-void apcie_icc_resume(struct apcie_dev *sc)
+void bpcie_icc_resume(struct bpcie_dev *sc)
 {
 }
 #endif

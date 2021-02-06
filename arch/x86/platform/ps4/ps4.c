@@ -32,9 +32,10 @@
 
 static bool is_ps4;
 bool apcie_initialized;
+bool bpcie_initialized;
 
 /*
- * The RTC is part of the Aeolia PCI device and will be implemented there as
+ * The RTC is part of the Aeolia/Baikal PCI device and will be implemented there as
  * an RTC class device; stub these out.
  */
 static void dummy_get_wallclock(struct timespec64 *now)
@@ -54,9 +55,17 @@ int apcie_status(void)
 {
 	if (!is_ps4)
 		return -ENODEV;
-	return apcie_initialized;
+	return apcie_initialized || bpcie_initialized;
 }
 EXPORT_SYMBOL_GPL(apcie_status);
+
+int bpcie_status(void)
+{
+	if (!is_ps4)
+		return -ENODEV;
+	return bpcie_initialized;
+}
+EXPORT_SYMBOL_GPL(bpcie_status);
 
 void icc_reboot(void);
 

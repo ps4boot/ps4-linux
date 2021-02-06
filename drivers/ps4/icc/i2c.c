@@ -4,6 +4,8 @@
 
 #include "../aeolia.h"
 
+#define apcie_dev		abpcie_dev
+
 #define ICC_MAX_READ_DATA 0xff
 #define ICC_MAX_WRITE_DATA 0xf8
 
